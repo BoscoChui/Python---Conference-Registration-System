@@ -24,6 +24,16 @@ python app.py
 
 The interactive menu lets attendees register and check in, lets the miner inspect and mine pending transactions, and lets the organizer run all required queries. Use option `2` after registration or check-in to confirm transactions and store them in a block. Use option `0` to exit.
 
+When `app.py` starts, the user first selects a role:
+
+```text
+1. Attendee menu
+2. Conference organizer menu
+0. Exit
+```
+
+The **Attendee menu** contains only student actions: register an account, submit a session check-in, and view personal attendance history. The **Conference organizer menu** contains conference-side actions: mine pending transactions, inspect the pending pool, view attendees, run all organizer queries, and validate the blockchain. Selecting `0` inside either menu returns to role selection.
+
 The demo creates `data/blockchain.json`, `data/attendees.json`, and `data/wallets/`. The blockchain and attendee files contain public keys only; private RSA keys are kept in individual wallet PEM files and are never included in transactions or blocks.
 
 ## Tests

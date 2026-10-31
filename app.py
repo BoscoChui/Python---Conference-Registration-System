@@ -8,22 +8,43 @@ from conference_registration import AttendeeActor, Blockchain, MinerActor, Organ
 DATA_DIR = Path("data")
 
 
-def print_menu() -> None:
+def print_role_menu() -> None:
     print(
         """
 === Conference Registration System ===
-1. Register attendee
-2. Mine pending transactions
-3. Attendee check-in
-4. View attendee attendance history
-5. View registered attendees
-6. Query sessions for attendee
-7. Query attendees in session
-8. Query registration status
-9. Query attendees absent from session
-10. View attendance statistics
-11. Validate blockchain
+1. Attendee menu
+2. Conference organizer menu
 0. Exit
+"""
+    )
+
+
+def print_attendee_menu() -> None:
+    print(
+        """
+=== Attendee Menu ===
+1. Register attendee account
+2. Submit session check-in
+3. View personal attendance history
+0. Back to role selection
+"""
+    )
+
+
+def print_conference_menu() -> None:
+    print(
+        """
+=== Conference Organizer Menu ===
+1. Mine pending transactions
+2. View pending transactions
+3. View registered attendees
+4. Query sessions for attendee
+5. Query attendees in session
+6. Query registration status
+7. Query attendees absent from session
+8. View attendance statistics
+9. Validate blockchain
+0. Back to role selection
 """
     )
 
@@ -84,23 +105,61 @@ def view_history(attendee_sessions: dict[str, AttendeeActor]) -> None:
 
 
 def organizer_queries(organizer: OrganizerActor, choice: str) -> None:
-    if choice == "5":
+    if choice == "3":
         for attendee in organizer.registered_attendees():
             print(f"{attendee['attendee_id']} | {attendee['name']} | {attendee['email']} | {attendee['status']}")
-    elif choice == "6":
+    elif choice == "4":
         attendee_id = input("Enter attendee ID: ").strip()
         print("Sessions:", organizer.sessions_for_participant(attendee_id))
-    elif choice == "7":
+    elif choice == "5":
         session_id = input("Enter session ID: ").strip()
         print("Attendees:", organizer.participants_in_session(session_id))
-    elif choice == "8":
+    elif choice == "6":
         attendee_id = input("Enter attendee ID: ").strip()
         print("Registration status:", organizer.registration_status(attendee_id))
-    elif choice == "9":
+    elif choice == "7":
         session_id = input("Enter session ID: ").strip()
         print("Attendees absent:", organizer.participants_not_in_session(session_id))
-    elif choice == "10":
+    elif choice == "8":
         print("Attendance statistics:", organizer.attendance_statistics())
+
+
+def attendee_menu(blockchain: Blockchain, attendee_sessions: dict[str, AttendeeActor]) -> None:
+    while True:
+        print_attendee_menu()
+        choice = input("Attendee option: ").strip()
+        if choice == "0":
+            return
+        if choice == "1":
+            register_attendee(blockchain, attendee_sessions)
+        elif choice == "2":
+            attendee_check_in(blockchain, attendee_sessions)
+        elif choice == "3":
+            view_history(attendee_sessions)
+        else:
+            print("Invalid option. Please choose a number from the menu.")
+
+
+def conference_menu(blockchain: Blockchain, miner: MinerActor, organizer: OrganizerActor) -> None:
+    while True:
+        print_conference_menu()
+        choice = input("Conference option: ").strip()
+        if choice == "0":
+            return
+        if choice == "1":
+            mine_transactions(miner)
+        elif choice == "2":
+            pending = miner.pending_transactions()
+            print(f"Pending transactions: {len(pending)}")
+            for transaction in pending:
+                print(transaction)
+        elif choice in {"3", "4", "5", "6", "7", "8"}:
+            organizer_queries(organizer, choice)
+        elif choice == "9":
+            valid, reason = miner.validate_chain()
+            print(f"Blockchain valid: {valid} ({reason})")
+        else:
+            print("Invalid option. Please choose a number from the menu.")
 
 
 def main() -> None:
@@ -110,26 +169,17 @@ def main() -> None:
     attendee_sessions: dict[str, AttendeeActor] = {}
 
     while True:
-        print_menu()
-        choice = input("Select an option: ").strip()
-        if choice == "0":
+        print_role_menu()
+        role = input("Select a user role: ").strip()
+        if role == "0":
             print("Goodbye.")
             return
-        if choice == "1":
-            register_attendee(blockchain, attendee_sessions)
-        elif choice == "2":
-            mine_transactions(miner)
-        elif choice == "3":
-            attendee_check_in(blockchain, attendee_sessions)
-        elif choice == "4":
-            view_history(attendee_sessions)
-        elif choice in {"5", "6", "7", "8", "9", "10"}:
-            organizer_queries(organizer, choice)
-        elif choice == "11":
-            valid, reason = miner.validate_chain()
-            print(f"Blockchain valid: {valid} ({reason})")
+        if role == "1":
+            attendee_menu(blockchain, attendee_sessions)
+        elif role == "2":
+            conference_menu(blockchain, miner, organizer)
         else:
-            print("Invalid option. Please choose a number from the menu.")
+            print("Invalid role. Choose Attendee, Conference organizer, or Exit.")
 
 
 if __name__ == "__main__":
