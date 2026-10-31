@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -83,6 +84,17 @@ class Wallet:
         contents = {attendee_id: key.save_pkcs1().decode("ascii") for attendee_id, key in self._private_keys.items()}
         path.write_text(json.dumps(contents, indent=2), encoding="utf-8")
 
+    def save_attendee_wallet(self, attendee_id: str, directory: str | Path = "wallets") -> Path:
+        """Persist one attendee's private key separately from blockchain data."""
+        private_key = self._private_keys.get(attendee_id)
+        if private_key is None:
+            raise ValueError(f"No private key for {attendee_id}")
+        directory = Path(directory)
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / f"{attendee_id}.pem"
+        path.write_bytes(private_key.save_pkcs1())
+        return path
+
 
 class Blockchain:
     TARGET_BLOCK_TIME = 10.0
@@ -117,11 +129,62 @@ class Blockchain:
     def _attendance_records(self) -> list[dict[str, Any]]:
         return [transaction for block in self.chain for transaction in block.transactions if transaction.get("type") == "attendance"]
 
+    def _registration_transactions(self, include_pending: bool = True) -> list[dict[str, Any]]:
+        transactions = [transaction for block in self.chain for transaction in block.transactions if transaction.get("type") == "registration"]
+        if include_pending:
+            transactions.extend(transaction for transaction in self.pending_transactions if transaction.get("type") == "registration")
+        return transactions
+
+    def _next_attendee_id(self) -> str:
+        used_ids = {transaction["attendee_id"] for transaction in self._registration_transactions()}
+        number = 1
+        while f"A{number:03d}" in used_ids:
+            number += 1
+        return f"A{number:03d}"
+
+    def register_attendee(
+        self,
+        wallet: Wallet,
+        name: str,
+        email: str,
+        wallet_directory: str | Path = "wallets",
+        attendee_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Create an identity, save its private key, and queue its public identity."""
+        name = name.strip()
+        email = email.strip().lower()
+        if not name:
+            raise ValueError("Registration failed: name cannot be empty")
+        if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+            raise ValueError("Registration failed: invalid email format")
+        existing = self._registration_transactions()
+        if any(transaction.get("email", "").lower() == email for transaction in existing):
+            raise ValueError("Registration failed: email already registered")
+        attendee_id = attendee_id or self._next_attendee_id()
+        if not re.fullmatch(r"A\d{3,}", attendee_id):
+            raise ValueError("Registration failed: attendee ID must look like A001")
+        if any(transaction.get("attendee_id") == attendee_id for transaction in existing):
+            raise ValueError("Registration failed: attendee ID already registered")
+        public_key = wallet.create_key_pair(attendee_id)
+        wallet_path = wallet.save_attendee_wallet(attendee_id, wallet_directory)
+        try:
+            transaction = self.add_registration(Attendee(attendee_id, name, email, public_key))
+        except Exception:
+            wallet_path.unlink(missing_ok=True)
+            raise
+        return transaction
+
     def add_registration(self, attendee: Attendee) -> dict[str, Any]:
+        if not attendee.name.strip():
+            raise ValueError("Registration failed: name cannot be empty")
+        if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", attendee.email.strip()):
+            raise ValueError("Registration failed: invalid email format")
         if self._registered_attendee(attendee.attendee_id) is not None:
             raise ValueError(f"Attendee {attendee.attendee_id} is already registered")
         if any(transaction.get("type") == "registration" and transaction.get("attendee_id") == attendee.attendee_id for transaction in self.pending_transactions):
             raise ValueError(f"Attendee {attendee.attendee_id} is already pending")
+        if any(transaction.get("email", "").lower() == attendee.email.strip().lower() for transaction in self._registration_transactions()):
+            raise ValueError("Registration failed: email already registered")
         transaction = {"type": "registration", **asdict(attendee), "timestamp": utc_timestamp()}
         self.pending_transactions.append(transaction)
         return transaction
@@ -220,6 +283,28 @@ class Blockchain:
     def registration_status(self, attendee_id: str) -> str:
         return "registered" if self._registered_attendee(attendee_id) else "not registered"
 
+    def get_public_key(self, attendee_id: str) -> str | None:
+        attendee = next((transaction for transaction in self._registration_transactions() if transaction.get("attendee_id") == attendee_id), None)
+        return attendee.get("public_key") if attendee else None
+
+    def list_attendees(self, include_pending: bool = False) -> list[dict[str, Any]]:
+        attendees = self._registration_transactions(include_pending=include_pending)
+        return [
+            {
+                "attendee_id": attendee["attendee_id"],
+                "name": attendee["name"],
+                "email": attendee["email"],
+                "public_key": attendee["public_key"],
+                "status": "Registered" if attendee in self._registration_transactions(include_pending=False) else "Pending",
+            }
+            for attendee in attendees
+        ]
+
+    def save_attendees(self, path: str | Path = "attendees.json") -> None:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(self.list_attendees(), indent=2), encoding="utf-8")
+
     def attendance_statistics(self) -> dict[str, Any]:
         records = self._attendance_records()
         sessions = {record["session_id"] for record in records}
@@ -247,3 +332,84 @@ class Blockchain:
         if not valid:
             raise ValueError(f"Cannot load invalid blockchain: {reason}")
         return instance
+
+
+class AttendeeActor:
+    """Student-facing workflow: register, check in, and view own history."""
+
+    def __init__(self, blockchain: Blockchain, wallet: Wallet | None = None, wallet_directory: str | Path = "wallets") -> None:
+        self.blockchain = blockchain
+        self.wallet = wallet or Wallet()
+        self.wallet_directory = Path(wallet_directory)
+        self.attendee_id: str | None = None
+
+    def register(self, name: str, email: str) -> dict[str, Any]:
+        transaction = self.blockchain.register_attendee(self.wallet, name, email, self.wallet_directory)
+        self.attendee_id = transaction["attendee_id"]
+        return {
+            "message": "Registration transaction created and added to pending pool",
+            "attendee_id": self.attendee_id,
+            "wallet_file": str(self.wallet_directory / f"{self.attendee_id}.pem"),
+            "transaction": transaction,
+        }
+
+    def check_in(self, session_id: str) -> dict[str, Any]:
+        if not self.attendee_id:
+            raise ValueError("Check-in failed: register an attendee account first")
+        if not session_id.strip():
+            raise ValueError("Check-in failed: session ID cannot be empty")
+        record = self.blockchain.create_attendance(self.wallet, self.attendee_id, session_id.strip())
+        self.blockchain.add_attendance(record)
+        return {"message": "Signed attendance certificate added to pending pool", "transaction": record}
+
+    def attendance_history(self) -> list[str]:
+        if not self.attendee_id:
+            raise ValueError("Attendance history unavailable: register an attendee account first")
+        return self.blockchain.sessions_attended_by(self.attendee_id)
+
+
+class MinerActor:
+    """Miner/system workflow: inspect, verify, mine, adjust, and validate."""
+
+    def __init__(self, blockchain: Blockchain, miner_id: str = "miner") -> None:
+        self.blockchain = blockchain
+        self.miner_id = miner_id
+
+    def pending_transactions(self) -> list[dict[str, Any]]:
+        return list(self.blockchain.pending_transactions)
+
+    def verify_pending_attendance(self) -> dict[str, int]:
+        valid = sum(transaction.get("type") == "attendance" and self.blockchain.verify_attendance(transaction) for transaction in self.blockchain.pending_transactions)
+        invalid = sum(transaction.get("type") == "attendance" and not self.blockchain.verify_attendance(transaction) for transaction in self.blockchain.pending_transactions)
+        return {"valid_attendance": valid, "invalid_attendance": invalid}
+
+    def mine(self) -> Block:
+        return self.blockchain.mine_pending_transactions(self.miner_id)
+
+    def validate_chain(self) -> tuple[bool, str]:
+        return self.blockchain.validate()
+
+
+class OrganizerActor:
+    """Organizer workflow: read registered identities and attendance records."""
+
+    def __init__(self, blockchain: Blockchain) -> None:
+        self.blockchain = blockchain
+
+    def registered_attendees(self) -> list[dict[str, Any]]:
+        return self.blockchain.list_attendees()
+
+    def sessions_for_participant(self, attendee_id: str) -> list[str]:
+        return self.blockchain.sessions_attended_by(attendee_id)
+
+    def participants_in_session(self, session_id: str) -> list[str]:
+        return self.blockchain.attendees_in_session(session_id)
+
+    def registration_status(self, attendee_id: str) -> str:
+        return self.blockchain.registration_status(attendee_id)
+
+    def participants_not_in_session(self, session_id: str) -> list[str]:
+        return self.blockchain.registered_not_in_session(session_id)
+
+    def attendance_statistics(self) -> dict[str, Any]:
+        return self.blockchain.attendance_statistics()

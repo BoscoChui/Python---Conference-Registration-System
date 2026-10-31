@@ -2,41 +2,47 @@
 
 from pathlib import Path
 
-from conference_registration import Attendee, Blockchain, Wallet
+from conference_registration import AttendeeActor, Blockchain, MinerActor, OrganizerActor
 
 
 def main() -> None:
     data_dir = Path("data")
-    wallet = Wallet()
     blockchain = Blockchain(initial_difficulty=2)
-    attendees = [("A001", "Alice Chan", "alice@example.com"), ("A002", "Bob Lee", "bob@example.com"), ("A003", "Carol Wong", "carol@example.com")]
+    miner = MinerActor(blockchain, "miner-1")
+    organizer = OrganizerActor(blockchain)
     print("=== Register attendees ===")
-    for attendee_id, name, email in attendees:
-        public_key = wallet.create_key_pair(attendee_id)
-        blockchain.add_registration(Attendee(attendee_id, name, email, public_key))
-        print(f"{attendee_id}: wallet key created; public key queued")
-    blockchain.mine_pending_transactions("miner-1")
+    attendees = []
+    for name, email in [("Alice Chan", "alice@example.com"), ("Bob Lee", "bob@example.com"), ("Carol Wong", "carol@example.com")]:
+        attendee = AttendeeActor(blockchain, wallet_directory=data_dir / "wallets")
+        result = attendee.register(name, email)
+        attendees.append(attendee)
+        print(f"{result['attendee_id']}: key pair created; private key saved; public key queued")
+    print("Pending registrations:", [attendee["attendee_id"] for attendee in blockchain.list_attendees(include_pending=True)])
+    print("Miner pending pool:", len(miner.pending_transactions()), "transactions")
+    miner.mine()
+    blockchain.save_attendees(data_dir / "attendees.json")
+    print("Registration block mined; attendees saved to data/attendees.json")
     print("\n=== Record signed attendance ===")
-    for attendee_id, session_id in [("A001", "S101"), ("A001", "S102"), ("A002", "S101")]:
-        record = blockchain.create_attendance(wallet, attendee_id, session_id)
-        blockchain.add_attendance(record)
-        print(f"{attendee_id} -> {session_id}: signature verified and queued")
-    blockchain.mine_pending_transactions("miner-1")
-    tampered = blockchain.create_attendance(wallet, "A003", "S101")
+    for attendee, session_id in [(attendees[0], "S101"), (attendees[0], "S102"), (attendees[1], "S101")]:
+        result = attendee.check_in(session_id)
+        print(f"{attendee.attendee_id} -> {session_id}: {result['message']}")
+    print("Miner verification:", miner.verify_pending_attendance())
+    miner.mine()
+    tampered = blockchain.create_attendance(attendees[2].wallet, "A003", "S101")
     tampered["session_id"] = "S999"
     print(f"Tampered certificate accepted? {blockchain.verify_attendance(tampered)}")
     print("\n=== Queries ===")
-    print("A001 sessions:", blockchain.sessions_attended_by("A001"))
-    print("S101 attendees:", blockchain.attendees_in_session("S101"))
-    print("Not in S102:", blockchain.registered_not_in_session("S102"))
-    print("A003 status:", blockchain.registration_status("A003"))
-    print("Statistics:", blockchain.attendance_statistics())
+    print("Registered attendees:", organizer.registered_attendees())
+    print("A001 sessions:", organizer.sessions_for_participant("A001"))
+    print("S101 attendees:", organizer.participants_in_session("S101"))
+    print("Not in S102:", organizer.participants_not_in_session("S102"))
+    print("A003 status:", organizer.registration_status("A003"))
+    print("Statistics:", organizer.attendance_statistics())
     print("Difficulty history:", blockchain.difficulty_history)
-    valid, reason = blockchain.validate()
+    valid, reason = miner.validate_chain()
     print(f"\nBlockchain validation: {valid} ({reason})")
     blockchain.save(data_dir / "blockchain.json")
-    wallet.save(data_dir / "wallet.json")
-    print("Saved data/blockchain.json and data/wallet.json")
+    print("Saved data/blockchain.json, data/attendees.json, and data/wallets/")
 
 
 if __name__ == "__main__":
